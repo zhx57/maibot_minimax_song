@@ -1,0 +1,28 @@
+# MaiBot MiniMax 音乐生成插件配置
+# 首次启动时若 config.toml 不存在，会自动从本文件复制生成
+
+[plugin]
+# 插件基础设置
+enabled = true           # 是否启用插件
+config_version = "1.0.0" # 配置版本号
+
+[music]
+# 音乐生成设置（MiniMax Music API）
+minimax_api_key = ""                              # MiniMax API Key（必填，留空将禁用插件，在 https://platform.minimaxi.com 申请）
+api_base_url = "https://api.minimaxi.com"         # MiniMax API 地址（国内版，国际版用 https://api.minimax.io）
+model = "music-2.6-free"                          # 音乐模型：music-2.6-free / music-2.5+ / music-2.5（instrumental 仅 2.5+/2.6-free 支持）
+output_dir = ""                                   # 音频输出目录，留空则使用插件数据目录下的 output/
+audio_format = "mp3"                              # 音频格式：mp3 / wav / pcm
+sample_rate = 44100                               # 采样率
+bitrate = 256000                                  # 比特率（仅 mp3 生效）
+send_mode = "record"                              # 发送方式：record(语音消息) / file(文件消息) / text(仅文本提示)；record 适合 QQ NapCat，失败会自动回退
+max_retries = 3                                   # API 调用最大重试次数（仅对限流/网络错误重试）
+retry_backoff_base = 1.5                          # 重试退避基数（指数退避：base ** attempt + 随机抖动）
+
+[buddy]
+# 宠物唱歌设置（buddy-sings 技能，让 bot 用独特嗓音唱歌）
+enabled = true                                    # 是否启用 buddy_sings 工具
+voice_cache_dir = ""                              # 声音身份缓存目录，留空则使用插件数据目录下的 voices/
+default_language = "zh"                           # 歌词默认语言（zh/en/ja/ko 等，影响 prompt_fragment 中的语言声明）
+fallback_nickname = "麦麦"                         # 读取全局 Bot 配置失败时的回退昵称
+fallback_personality = ""                         # 读取全局 Bot 配置失败时的回退人格描述

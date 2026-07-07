@@ -1,0 +1,52 @@
+{
+  "manifest_version": 2,
+  "id": "com.maibot.minimax-music",
+  "name": "MaiBot MiniMax 音乐生成",
+  "version": "1.0.0",
+  "description": "基于 MiniMax Music API 的音乐生成插件，支持人声/纯音乐/翻唱/buddy-sings（宠物唱歌）",
+  "author": {
+    "name": "maibot-community",
+    "url": "https://github.com/maibot-community"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/maibot-community/maibot-minimax-music",
+    "homepage": "https://github.com/maibot-community/maibot-minimax-music"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "1.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "aiohttp",
+      "version_spec": ">=3.8.0"
+    }
+  ],
+  "plugin_type": "media",
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "music-note"
+    }
+  },
+  "capabilities": [
+    "send.text",
+    "send.custom",
+    "send.record",
+    "send.file",
+    "message.get_by_id",
+    "chat.get_all_streams",
+    "chat.get_group_streams",
+    "chat.get_private_streams"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  }
+}
