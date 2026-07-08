@@ -102,10 +102,14 @@ def _to_bool(val: Any) -> bool:
 
 
 def _format_duration(duration: Any) -> str:
-    """将毫秒时长格式化为秒字符串。"""
+    """格式化时长（毫秒 → mm:ss）。None 或非法值返回 '未知'。"""
     try:
-        sec = float(duration) / 1000
-        return f"{sec:.1f} 秒"
+        ms = int(duration or 0)
+        if ms <= 0:
+            return "未知"
+        seconds = ms // 1000
+        minutes, secs = divmod(seconds, 60)
+        return f"{minutes}:{secs:02d}"
     except (TypeError, ValueError):
         return "未知"
 
@@ -135,63 +139,67 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
     # ------------------------------------------------------------------
 
     async def on_load(self) -> None:
-        self._ensure_config_exists()
+        try:
+            self._ensure_config_exists()
 
-        music_cfg = self.config.music
-        buddy_cfg = self.config.buddy
+            music_cfg = self.config.music
+            buddy_cfg = self.config.buddy
 
-        # 校验 api_key
-        if not music_cfg.minimax_api_key:
-            self.ctx.logger.warning("MiniMax API Key 未配置，插件已禁用")
+            # 校验 api_key
+            if not music_cfg.minimax_api_key:
+                self.ctx.logger.warning("MiniMax API Key 未配置，插件已禁用")
+                self._enabled = False
+                return
+
+            self._enabled = True
+
+            # 初始化 music_service
+            self.music_service = MiniMaxMusicService(
+                api_key=music_cfg.minimax_api_key,
+                api_base_url=music_cfg.api_base_url,
+                model=music_cfg.model,
+                max_retries=music_cfg.max_retries,
+                retry_backoff_base=music_cfg.retry_backoff_base,
+                logger=self.ctx.logger,
+            )
+
+            # 解析 voice_cache_dir 并初始化 voice_mgr
+            voice_cache_dir = self._resolve_voice_cache_dir()
+            self.voice_mgr = VoiceIdentityManager(
+                cache_dir=voice_cache_dir,
+                logger=self.ctx.logger,
+            )
+
+            # 初始化 _bot_nickname / _bot_personality 为 fallback 值
+            self._bot_nickname = buddy_cfg.fallback_nickname
+            self._bot_personality = buddy_cfg.fallback_personality
+
+            # 防御性尝试：从全局 Bot 配置读取初始值（文档矛盾，best-effort）
+            try:
+                all_cfg = self.ctx.config.get_all()
+                if asyncio.iscoroutine(all_cfg):
+                    all_cfg = await all_cfg
+                if isinstance(all_cfg, dict):
+                    nick = self._extract_bot_field(all_cfg, "nickname", ["bot_name", "name"])
+                    pers = self._extract_bot_field(all_cfg, "personality", ["bot_persona", "persona"])
+                    if nick:
+                        self._bot_nickname = nick
+                    if pers:
+                        self._bot_personality = pers
+            except Exception as e:
+                self.ctx.logger.warning("读取全局 Bot 配置失败，使用 fallback 值：%s", e)
+
+            # 创建输出目录
+            output_dir = self._resolve_output_dir()
+            try:
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                self.ctx.logger.warning("创建输出目录失败：%s", e)
+
+            self.ctx.logger.info("MaiBot MiniMax 音乐生成插件已加载")
+        except Exception:
+            self.ctx.logger.exception("on_load 失败，插件将以禁用状态加载")
             self._enabled = False
-            return
-
-        self._enabled = True
-
-        # 初始化 music_service
-        self.music_service = MiniMaxMusicService(
-            api_key=music_cfg.minimax_api_key,
-            api_base_url=music_cfg.api_base_url,
-            model=music_cfg.model,
-            max_retries=music_cfg.max_retries,
-            retry_backoff_base=music_cfg.retry_backoff_base,
-            logger=self.ctx.logger,
-        )
-
-        # 解析 voice_cache_dir 并初始化 voice_mgr
-        voice_cache_dir = self._resolve_voice_cache_dir()
-        self.voice_mgr = VoiceIdentityManager(
-            cache_dir=voice_cache_dir,
-            logger=self.ctx.logger,
-        )
-
-        # 初始化 _bot_nickname / _bot_personality 为 fallback 值
-        self._bot_nickname = buddy_cfg.fallback_nickname
-        self._bot_personality = buddy_cfg.fallback_personality
-
-        # 防御性尝试：从全局 Bot 配置读取初始值（文档矛盾，best-effort）
-        try:
-            all_cfg = self.ctx.config.get_all()
-            if asyncio.iscoroutine(all_cfg):
-                all_cfg = await all_cfg
-            if isinstance(all_cfg, dict):
-                nick = self._extract_bot_field(all_cfg, "nickname", ["bot_name", "name"])
-                pers = self._extract_bot_field(all_cfg, "personality", ["bot_persona", "persona"])
-                if nick:
-                    self._bot_nickname = nick
-                if pers:
-                    self._bot_personality = pers
-        except Exception as e:
-            self.ctx.logger.warning("读取全局 Bot 配置失败，使用 fallback 值：%s", e)
-
-        # 创建输出目录
-        output_dir = self._resolve_output_dir()
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            self.ctx.logger.warning("创建输出目录失败：%s", e)
-
-        self.ctx.logger.info("MaiBot MiniMax 音乐生成插件已加载")
 
     async def on_unload(self) -> None:
         if self.music_service:
@@ -206,10 +214,13 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
     async def on_config_update(
         self, scope: str, config_data: dict[str, object], version: str
     ) -> None:
-        if scope == CONFIG_RELOAD_SCOPE_SELF:
-            await self._on_self_config_update()
-        elif scope == ON_BOT_CONFIG_RELOAD or scope == "bot":
-            await self._on_bot_config_update(config_data)
+        try:
+            if scope == CONFIG_RELOAD_SCOPE_SELF:
+                await self._on_self_config_update()
+            elif scope == ON_BOT_CONFIG_RELOAD or scope == "bot":
+                await self._on_bot_config_update(config_data)
+        except Exception:
+            self.ctx.logger.exception("on_config_update 失败，保持原配置不变")
 
     async def _on_self_config_update(self) -> None:
         """插件自身配置热重载。"""
@@ -323,23 +334,39 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
 
     def _resolve_output_dir(self) -> Path:
         """解析音频输出目录。空则用 data_dir/output；非空按字面路径（相对路径基于插件目录）。"""
-        output_dir = self.config.music.output_dir
-        if output_dir:
-            path = Path(output_dir)
-            if not path.is_absolute():
-                path = Path(__file__).parent / path
-            return path
-        return self.ctx.paths.data_dir / "output"
+        try:
+            output_dir = self.config.music.output_dir
+            if output_dir:
+                path = Path(output_dir)
+                if not path.is_absolute():
+                    path = Path(__file__).parent / path
+                return path
+            if self.ctx and getattr(self.ctx, "paths", None):
+                return self.ctx.paths.data_dir / "output"
+        except Exception:
+            pass
+        # 回退到插件目录下的 output
+        return Path(__file__).parent / "output"
 
     def _resolve_voice_cache_dir(self) -> Path:
         """解析声音身份缓存目录。空则用 data_dir/voices；非空按字面路径。"""
-        voice_cache_dir = self.config.buddy.voice_cache_dir
-        if voice_cache_dir:
-            return Path(voice_cache_dir)
-        return self.ctx.paths.data_dir / "voices"
+        try:
+            voice_cache_dir = self.config.buddy.voice_cache_dir
+            if voice_cache_dir:
+                return Path(voice_cache_dir)
+            if self.ctx and getattr(self.ctx, "paths", None):
+                return self.ctx.paths.data_dir / "voices"
+        except Exception:
+            pass
+        # 回退到插件目录下的 voices
+        return Path(__file__).parent / "voices"
 
     async def _find_stream_id(self, **kwargs: Any) -> Optional[str]:
         """三段回退解析 stream_id：kwargs → message → group streams → private streams。"""
+        # 0. ctx 可能未初始化
+        if not getattr(self, "ctx", None):
+            return None
+
         # 1. kwargs.stream_id
         sid = kwargs.get("stream_id")
         if sid:
@@ -400,7 +427,9 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
 
             if is_buddy:
                 nickname = self._bot_nickname or "bot"
-                filename = f"{nickname}_sings_{timestamp}.mp3"
+                # sanitize nickname 防止路径遍历（如 ../、绝对路径）
+                safe_nickname = re.sub(r"[^\w\u4e00-\u9fff-]", "_", nickname) or "bot"
+                filename = f"{safe_nickname}_sings_{timestamp}.mp3"
             else:
                 slug = re.sub(r"[^\w\u4e00-\u9fff-]", "_", (prompt or "")[:20]) or "audio"
                 filename = f"{timestamp}_{slug}.mp3"
@@ -424,6 +453,9 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
 
         audio_data = f"base64://{audio_base64}"
         mode = self.config.music.send_mode
+        if mode not in ("record", "file", "text"):
+            self.ctx.logger.warning("send_mode 配置值 '%s' 不合法，回退到 record", mode)
+            mode = "record"
 
         attempts: list[tuple[str, dict[str, Any]]] = []
         if mode == "file":
@@ -637,99 +669,110 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """生成歌曲工具。"""
-        # 1. 启用检查
-        if not self._enabled or not self.music_service:
-            return {"success": False, "content": "插件未启用（API Key 未配置）"}
+        try:
+            # 1. 启用检查
+            if not self._enabled or not self.music_service:
+                return {"success": False, "content": "插件未启用（API Key 未配置）"}
 
-        if not prompt or not str(prompt).strip():
-            return {"success": False, "content": "prompt 不能为空"}
+            # 参数类型健壮性：prompt 强制 str 转换并校验
+            if prompt is None:
+                return {"success": False, "content": "prompt 不能为空"}
+            prompt = str(prompt).strip()
+            if not prompt:
+                return {"success": False, "content": "prompt 不能为空"}
 
-        # 兼容 SDK 传 string 的情况
-        auto_lyrics = _to_bool(auto_lyrics)
-        mode = (mode or "").lower()
+            # 兼容 SDK 传 string 的情况
+            auto_lyrics = _to_bool(auto_lyrics)
+            mode = (mode or "").lower()
 
-        # 2. 解析 stream_id
-        stream_id = await self._find_stream_id(**kwargs)
+            # 2. 解析 stream_id
+            stream_id = await self._find_stream_id(**kwargs)
 
-        # 3. 拼接结构化参数到 prompt
-        full_prompt = str(prompt)
-        extras = []
-        if genre:
-            extras.append(f"Genre: {genre}")
-        if mood:
-            extras.append(f"Mood: {mood}")
-        if vocals:
-            extras.append(f"Vocals: {vocals}")
-        if instruments:
-            extras.append(f"Instruments: {instruments}")
-        if bpm:
-            extras.append(f"BPM: {bpm}")
-        if extras:
-            full_prompt = f"{full_prompt}. {', '.join(extras)}"
+            # 3. 拼接结构化参数到 prompt
+            full_prompt = prompt
+            extras = []
+            if genre:
+                extras.append(f"Genre: {genre}")
+            if mood:
+                extras.append(f"Mood: {mood}")
+            if vocals:
+                extras.append(f"Vocals: {vocals}")
+            if instruments:
+                extras.append(f"Instruments: {instruments}")
+            if bpm:
+                extras.append(f"BPM: {bpm}")
+            if extras:
+                full_prompt = f"{full_prompt}. {', '.join(extras)}"
 
-        # 4. is_instrumental
-        is_instrumental = (mode == "instrumental")
+            # 4. is_instrumental
+            is_instrumental = (mode == "instrumental")
 
-        # 5. lyrics 逻辑
-        if is_instrumental:
-            lyrics_param = None
-            lyrics_optimizer = False
-        elif lyrics:
-            lyrics_param = lyrics
-            lyrics_optimizer = False
-        else:
-            lyrics_param = None
-            lyrics_optimizer = auto_lyrics
-
-        # 6. 调用 music_service.generate
-        music_cfg = self.config.music
-        result = await self.music_service.generate(
-            prompt=full_prompt,
-            lyrics=lyrics_param,
-            is_instrumental=is_instrumental,
-            lyrics_optimizer=lyrics_optimizer,
-            sample_rate=music_cfg.sample_rate,
-            bitrate=music_cfg.bitrate,
-            fmt=music_cfg.audio_format,
-        )
-
-        # 7. 成功
-        if result.get("success"):
-            audio_base64 = result.get("audio_base64", "")
-            try:
-                audio_bytes = base64.b64decode(audio_base64)
-            except Exception as e:
-                self.ctx.logger.error("base64 解码失败：%s", e)
-                return {"success": False, "content": "生成失败：音频解码异常"}
-
-            file_path = self._save_audio(audio_bytes, str(prompt))
-            if file_path:
-                filename = file_path.name
-                file_path_str = str(file_path)
+            # 5. lyrics 逻辑
+            if is_instrumental:
+                lyrics_param = None
+                lyrics_optimizer = False
+            elif lyrics:
+                lyrics_param = lyrics
+                lyrics_optimizer = False
             else:
-                filename = f"music_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-                file_path_str = ""
+                lyrics_param = None
+                lyrics_optimizer = auto_lyrics
 
-            # 发送
-            if stream_id:
-                await self._send_audio(audio_base64, filename, stream_id)
-                content = f"已生成歌曲：{filename}，时长 {_format_duration(result.get('duration', 0))}"
-            else:
-                content = f"已生成并保存到 {file_path_str or filename}，未发送（无可用 stream_id）"
+            # 6. 调用 music_service.generate
+            music_cfg = self.config.music
+            result = await self.music_service.generate(
+                prompt=full_prompt,
+                lyrics=lyrics_param,
+                is_instrumental=is_instrumental,
+                lyrics_optimizer=lyrics_optimizer,
+                sample_rate=music_cfg.sample_rate,
+                bitrate=music_cfg.bitrate,
+                fmt=music_cfg.audio_format,
+            )
 
+            # 7. 成功
+            if result.get("success"):
+                audio_base64 = result.get("audio_base64", "")
+                try:
+                    audio_bytes = base64.b64decode(audio_base64)
+                except Exception as e:
+                    self.ctx.logger.error("base64 解码失败：%s", e)
+                    return {"success": False, "content": "生成失败：音频解码异常"}
+
+                file_path = self._save_audio(audio_bytes, prompt)
+                if file_path:
+                    filename = file_path.name
+                    file_path_str = str(file_path)
+                else:
+                    filename = f"music_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+                    file_path_str = ""
+
+                # 发送
+                if stream_id:
+                    await self._send_audio(audio_base64, filename, stream_id)
+                    content = f"已生成歌曲：{filename}，时长 {_format_duration(result.get('duration') or 0)}"
+                else:
+                    content = f"已生成并保存到 {file_path_str or filename}，未发送（无可用 stream_id）"
+
+                return {
+                    "success": True,
+                    "content": content,
+                    "file_path": file_path_str,
+                }
+
+            # 8. 失败
+            error = result.get("error", "未知错误")
+            self.ctx.logger.warning("generate_song 失败：%s (code=%s)", error, result.get("code"))
             return {
-                "success": True,
-                "content": content,
-                "file_path": file_path_str,
+                "success": False,
+                "content": f"生成失败：{error}，请稍后重试或检查配置",
             }
-
-        # 8. 失败
-        error = result.get("error", "未知错误")
-        self.ctx.logger.warning("generate_song 失败：%s (code=%s)", error, result.get("code"))
-        return {
-            "success": False,
-            "content": f"生成失败：{error}，请稍后重试或检查配置",
-        }
+        except Exception:
+            self.ctx.logger.exception("generate_song 未预期异常")
+            return {
+                "success": False,
+                "content": "生成时发生未预期错误，请稍后重试",
+            }
 
     # ------------------------------------------------------------------
     # @Tool: cover_song
@@ -786,62 +829,79 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """翻唱生成工具。"""
-        # 1. 启用检查
-        if not self._enabled or not self.music_service:
-            return {"success": False, "content": "插件未启用（API Key 未配置）"}
+        try:
+            # 1. 启用检查
+            if not self._enabled or not self.music_service:
+                return {"success": False, "content": "插件未启用（API Key 未配置）"}
 
-        if not prompt or not str(prompt).strip():
-            return {"success": False, "content": "prompt 不能为空"}
-        if not audio_url or not str(audio_url).strip():
-            return {"success": False, "content": "audio_url 不能为空"}
+            # 参数类型健壮性
+            if prompt is None:
+                return {"success": False, "content": "prompt 不能为空"}
+            prompt = str(prompt).strip()
+            if not prompt:
+                return {"success": False, "content": "prompt 不能为空"}
 
-        # 2. 解析 stream_id
-        stream_id = await self._find_stream_id(**kwargs)
+            if audio_url is None:
+                return {"success": False, "content": "audio_url 不能为空"}
+            audio_url = str(audio_url).strip()
+            if not audio_url:
+                return {"success": False, "content": "audio_url 不能为空"}
+            if not (audio_url.startswith("http://") or audio_url.startswith("https://")):
+                return {"success": False, "content": "audio_url 必须是 http:// 或 https:// 开头的 URL"}
 
-        # 3. 调用 music_service.cover（走 audio_url 路径，不上传本地文件）
-        result = await self.music_service.cover(
-            prompt=str(prompt),
-            audio_url=str(audio_url),
-            lyrics=lyrics or None,
-        )
+            # 2. 解析 stream_id
+            stream_id = await self._find_stream_id(**kwargs)
 
-        # 4. 成功
-        if result.get("success"):
-            audio_base64 = result.get("audio_base64", "")
-            try:
-                audio_bytes = base64.b64decode(audio_base64)
-            except Exception as e:
-                self.ctx.logger.error("base64 解码失败：%s", e)
-                return {"success": False, "content": "翻唱失败：音频解码异常"}
+            # 3. 调用 music_service.cover（走 audio_url 路径，不上传本地文件）
+            result = await self.music_service.cover(
+                prompt=prompt,
+                audio_url=audio_url,
+                lyrics=lyrics or None,
+            )
 
-            file_path = self._save_audio(audio_bytes, str(prompt))
-            if file_path:
-                filename = file_path.name
-                file_path_str = str(file_path)
-            else:
-                filename = f"cover_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-                file_path_str = ""
+            # 4. 成功
+            if result.get("success"):
+                audio_base64 = result.get("audio_base64", "")
+                try:
+                    audio_bytes = base64.b64decode(audio_base64)
+                except Exception as e:
+                    self.ctx.logger.error("base64 解码失败：%s", e)
+                    return {"success": False, "content": "翻唱失败：音频解码异常"}
 
-            # 发送
-            if stream_id:
-                await self._send_audio(audio_base64, filename, stream_id)
-                content = f"已生成翻唱：{filename}，时长 {_format_duration(result.get('duration', 0))}"
-            else:
-                content = f"已生成并保存到 {file_path_str or filename}，未发送（无可用 stream_id）"
+                file_path = self._save_audio(audio_bytes, prompt)
+                if file_path:
+                    filename = file_path.name
+                    file_path_str = str(file_path)
+                else:
+                    filename = f"cover_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+                    file_path_str = ""
 
+                # 发送
+                if stream_id:
+                    await self._send_audio(audio_base64, filename, stream_id)
+                    content = f"已生成翻唱：{filename}，时长 {_format_duration(result.get('duration') or 0)}"
+                else:
+                    content = f"已生成并保存到 {file_path_str or filename}，未发送（无可用 stream_id）"
+
+                return {
+                    "success": True,
+                    "content": content,
+                    "file_path": file_path_str,
+                }
+
+            # 5. 失败
+            error = result.get("error", "未知错误")
+            self.ctx.logger.warning("cover_song 失败：%s (code=%s)", error, result.get("code"))
             return {
-                "success": True,
-                "content": content,
-                "file_path": file_path_str,
+                "success": False,
+                "content": f"翻唱失败：{error}，请稍后重试或检查参考音频 URL 是否可访问",
             }
-
-        # 5. 失败
-        error = result.get("error", "未知错误")
-        self.ctx.logger.warning("cover_song 失败：%s (code=%s)", error, result.get("code"))
-        return {
-            "success": False,
-            "content": f"翻唱失败：{error}，请稍后重试或检查参考音频 URL 是否可访问",
-        }
+        except Exception:
+            self.ctx.logger.exception("cover_song 未预期异常")
+            return {
+                "success": False,
+                "content": "翻唱时发生未预期错误，请稍后重试",
+            }
 
     # ------------------------------------------------------------------
     # @Tool: buddy_sings
@@ -899,105 +959,120 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """buddy_sings 工具：让 bot 唱歌。"""
-        # 1. 启用检查
-        if not self._enabled or not self.music_service:
-            return {"success": False, "content": "插件未启用（API Key 未配置）"}
+        try:
+            # 1. 启用检查
+            if not self._enabled or not self.music_service:
+                return {"success": False, "content": "插件未启用（API Key 未配置）"}
 
-        # 2. buddy 功能检查
-        if not self.config.buddy.enabled:
-            return {"success": False, "content": "buddy_sings 功能未启用"}
+            # 2. buddy 功能检查
+            if not self.config.buddy.enabled:
+                return {"success": False, "content": "buddy_sings 功能未启用"}
 
-        if not self.voice_mgr:
-            return {"success": False, "content": "声音身份管理器未初始化"}
+            if not self.voice_mgr:
+                return {"success": False, "content": "声音身份管理器未初始化"}
 
-        regenerate = _to_bool(regenerate)
+            # 参数类型健壮性：theme / custom_lyrics 强制 str 转换（可空）
+            theme = str(theme or "").strip()
+            custom_lyrics = str(custom_lyrics or "").strip()
 
-        # 3. 解析 stream_id
-        stream_id = await self._find_stream_id(**kwargs)
+            regenerate = _to_bool(regenerate)
 
-        # 4. 获取 bot 人格
-        buddy_cfg = self.config.buddy
-        nickname = self._bot_nickname or buddy_cfg.fallback_nickname
-        personality = self._bot_personality or buddy_cfg.fallback_personality
+            # 3. 解析 stream_id
+            stream_id = await self._find_stream_id(**kwargs)
 
-        # 5. regenerate → 删除缓存
-        if regenerate:
-            self.voice_mgr.regenerate(nickname)
+            # 4. 获取 bot 人格
+            buddy_cfg = self.config.buddy
+            nickname = self._bot_nickname or buddy_cfg.fallback_nickname
+            personality = self._bot_personality or buddy_cfg.fallback_personality
 
-        # 6. 获取/构建声音身份
-        prompt_fragment = self.voice_mgr.get_or_build(
-            nickname, personality, buddy_cfg.default_language
-        )
+            # 5. regenerate → 删除缓存
+            if regenerate:
+                self.voice_mgr.regenerate(nickname)
 
-        # 7. 主题 fallback
-        if not theme:
-            theme = self._fallback_theme_by_personality(personality)
+            # 6. 获取/构建声音身份
+            prompt_fragment = self.voice_mgr.get_or_build(
+                nickname, personality, buddy_cfg.default_language
+            )
+            if not prompt_fragment:
+                # nickname 为空或构建失败，用通用描述兜底
+                prompt_fragment = "Vocal: warm natural voice singing in Mandarin Chinese."
+                self.ctx.logger.warning("prompt_fragment 为空，使用默认声音描述")
 
-        # 8. 匹配 genre + 反单调
-        candidates = self._match_genre_by_theme(theme)
-        genre, mood, instruments, tempo, scene = self._choose_genre(candidates)
+            # 7. 主题 fallback
+            if not theme:
+                theme = self._fallback_theme_by_personality(personality)
 
-        # 9. 拼接 prompt
-        full_prompt = (
-            f"{prompt_fragment}. A {genre} song with {mood} mood, "
-            f"featuring {instruments}, at {tempo} tempo, evoking {scene}."
-        )
+            # 8. 匹配 genre + 反单调
+            candidates = self._match_genre_by_theme(theme)
+            genre, mood, instruments, tempo, scene = self._choose_genre(candidates)
 
-        # 10. lyrics 逻辑
-        if custom_lyrics:
-            lyrics_param = custom_lyrics
-            lyrics_optimizer = False
-        else:
-            lyrics_param = None
-            lyrics_optimizer = True
+            # 9. 拼接 prompt
+            full_prompt = (
+                f"{prompt_fragment}. A {genre} song with {mood} mood, "
+                f"featuring {instruments}, at {tempo} tempo, evoking {scene}."
+            )
 
-        # 11. 调用 music_service.generate
-        music_cfg = self.config.music
-        result = await self.music_service.generate(
-            prompt=full_prompt,
-            lyrics=lyrics_param,
-            is_instrumental=False,
-            lyrics_optimizer=lyrics_optimizer,
-            sample_rate=music_cfg.sample_rate,
-            bitrate=music_cfg.bitrate,
-            fmt=music_cfg.audio_format,
-        )
-
-        # 12. 成功
-        if result.get("success"):
-            audio_base64 = result.get("audio_base64", "")
-            try:
-                audio_bytes = base64.b64decode(audio_base64)
-            except Exception as e:
-                self.ctx.logger.error("base64 解码失败：%s", e)
-                return {"success": False, "content": "生成失败：音频解码异常"}
-
-            file_path = self._save_audio(audio_bytes, theme, is_buddy=True)
-            if file_path:
-                filename = file_path.name
-                file_path_str = str(file_path)
+            # 10. lyrics 逻辑
+            if custom_lyrics:
+                lyrics_param = custom_lyrics
+                lyrics_optimizer = False
             else:
-                filename = f"{nickname}_sings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-                file_path_str = ""
+                lyrics_param = None
+                lyrics_optimizer = True
 
-            if stream_id:
-                await self._send_audio(audio_base64, filename, stream_id)
+            # 11. 调用 music_service.generate
+            music_cfg = self.config.music
+            result = await self.music_service.generate(
+                prompt=full_prompt,
+                lyrics=lyrics_param,
+                is_instrumental=False,
+                lyrics_optimizer=lyrics_optimizer,
+                sample_rate=music_cfg.sample_rate,
+                bitrate=music_cfg.bitrate,
+                fmt=music_cfg.audio_format,
+            )
 
+            # 12. 成功
+            if result.get("success"):
+                audio_base64 = result.get("audio_base64", "")
+                try:
+                    audio_bytes = base64.b64decode(audio_base64)
+                except Exception as e:
+                    self.ctx.logger.error("base64 解码失败：%s", e)
+                    return {"success": False, "content": "生成失败：音频解码异常"}
+
+                file_path = self._save_audio(audio_bytes, theme, is_buddy=True)
+                if file_path:
+                    filename = file_path.name
+                    file_path_str = str(file_path)
+                else:
+                    filename = f"{nickname}_sings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+                    file_path_str = ""
+
+                if stream_id:
+                    await self._send_audio(audio_base64, filename, stream_id)
+
+                return {
+                    "success": True,
+                    "content": f"已为你唱了一首关于{theme}的{genre}歌曲",
+                    "theme": theme,
+                    "genre": genre,
+                    "file_path": file_path_str,
+                }
+
+            # 13. 失败
+            error = result.get("error", "未知错误")
+            self.ctx.logger.warning("buddy_sings 失败：%s (code=%s)", error, result.get("code"))
             return {
-                "success": True,
-                "content": f"已为你唱了一首关于{theme}的{genre}歌曲",
-                "theme": theme,
-                "genre": genre,
-                "file_path": file_path_str,
+                "success": False,
+                "content": f"生成失败：{error}，请稍后重试或检查配置",
             }
-
-        # 13. 失败
-        error = result.get("error", "未知错误")
-        self.ctx.logger.warning("buddy_sings 失败：%s (code=%s)", error, result.get("code"))
-        return {
-            "success": False,
-            "content": f"生成失败：{error}，请稍后重试或检查配置",
-        }
+        except Exception:
+            self.ctx.logger.exception("buddy_sings 未预期异常")
+            return {
+                "success": False,
+                "content": "生成时发生未预期错误，请稍后重试",
+            }
 
     # ------------------------------------------------------------------
     # @API: minimax_music_generate
@@ -1023,19 +1098,26 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
 
         不自动发送消息、不保存文件，由调用方决定。
         """
-        if not self._enabled or not self.music_service:
-            return {"success": False, "error": "插件未启用"}
+        try:
+            if not self._enabled or not self.music_service:
+                return {"success": False, "error": "插件未启用"}
 
-        result = await self.music_service.generate(
-            prompt=prompt,
-            lyrics=lyrics or None,
-            is_instrumental=is_instrumental,
-            lyrics_optimizer=lyrics_optimizer,
-            sample_rate=sample_rate,
-            bitrate=bitrate,
-            fmt=fmt,
-        )
-        return result
+            result = await self.music_service.generate(
+                prompt=prompt,
+                lyrics=lyrics or None,
+                is_instrumental=is_instrumental,
+                lyrics_optimizer=lyrics_optimizer,
+                sample_rate=sample_rate,
+                bitrate=bitrate,
+                fmt=fmt,
+            )
+            return result
+        except Exception:
+            self.ctx.logger.exception("minimax_music_generate 未预期异常")
+            return {
+                "success": False,
+                "error": "生成时发生未预期错误，请稍后重试",
+            }
 
 
 # ====================================================================

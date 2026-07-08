@@ -289,6 +289,70 @@ async def test_cover_song_with_custom_lyrics(plugin_with_services):
 
 
 # ----------------------------------------------------------------------
+# 健壮性：异常不冒泡、不泄露思考链
+# ----------------------------------------------------------------------
+
+async def test_generate_song_exception_returns_friendly(plugin_with_services, mock_ctx):
+    """music_service.generate 抛异常时返回友好中文消息，不冒泡。"""
+    plugin_with_services.music_service.generate = AsyncMock(
+        side_effect=RuntimeError("internal secret token=XYZ leaked")
+    )
+    result = await plugin_with_services.generate_song(prompt="folk", stream_id="s1")
+    assert result["success"] is False
+    assert "未预期" in result["content"] or "稍后重试" in result["content"]
+    # 关键：异常消息不泄露到返回给 LLM 的 content
+    assert "secret" not in result["content"]
+    assert "XYZ" not in result["content"]
+
+
+async def test_cover_song_invalid_url_returns_error(plugin_with_services):
+    """audio_url 非 http(s):// 开头时返回明确错误，不调用 cover。"""
+    plugin_with_services.music_service.cover = AsyncMock()
+    result = await plugin_with_services.cover_song(
+        prompt="cover", audio_url="not_a_url", stream_id="s1"
+    )
+    assert result["success"] is False
+    assert "http" in result["content"]
+    plugin_with_services.music_service.cover.assert_not_awaited()
+
+
+async def test_buddy_sings_prompt_fragment_empty_falls_back(plugin_with_services):
+    """voice_mgr 返回空 prompt_fragment 时用默认描述兜底，不崩。"""
+    plugin_with_services.voice_mgr.get_or_build = MagicMock(return_value="")
+    plugin_with_services.music_service.generate = AsyncMock(return_value=_success_result())
+    plugin_with_services._bot_nickname = "麦麦"
+    plugin_with_services._bot_personality = "温柔"
+    result = await plugin_with_services.buddy_sings(theme="深夜", stream_id="s1")
+    # 应该成功生成（用兜底描述）
+    assert result["success"] is True
+    # generate 被调用且 prompt 非空
+    kwargs = plugin_with_services.music_service.generate.await_args.kwargs
+    assert kwargs["prompt"]  # 非空
+
+
+async def test_generate_song_prompt_none(plugin_with_services):
+    """prompt=None 时返回明确错误，不 TypeError。"""
+    plugin_with_services.music_service.generate = AsyncMock()
+    result = await plugin_with_services.generate_song(prompt=None, stream_id="s1")
+    assert result["success"] is False
+    assert "prompt" in result["content"]
+
+
+async def test_on_load_exception_disables_plugin(plugin, monkeypatch):
+    """on_load 抛异常时降级为 _enabled=False，不冒泡。"""
+    monkeypatch.setattr(MiniMaxMusicPlugin, "_ensure_config_exists", lambda self: None)
+    plugin.config.music.minimax_api_key = "test-key"
+    # 让 MiniMaxMusicService 初始化抛异常
+    import plugin as plugin_mod
+    monkeypatch.setattr(
+        plugin_mod, "MiniMaxMusicService",
+        MagicMock(side_effect=RuntimeError("init boom"))
+    )
+    await plugin.on_load()
+    assert plugin._enabled is False
+
+
+# ----------------------------------------------------------------------
 # buddy_sings 工具
 # ----------------------------------------------------------------------
 
