@@ -231,6 +231,64 @@ async def test_generate_song_no_stream_id(plugin_with_services, mock_ctx):
 
 
 # ----------------------------------------------------------------------
+# cover_song 工具
+# ----------------------------------------------------------------------
+
+async def test_cover_song_success(plugin_with_services, mock_ctx):
+    """mock music_service.cover 成功，验证 audio_url 透传 + _send_audio 调用。"""
+    plugin_with_services.music_service.cover = AsyncMock(return_value=_success_result())
+    result = await plugin_with_services.cover_song(
+        prompt="acoustic cover with soft piano",
+        audio_url="https://example.com/song.mp3",
+        stream_id="s1",
+    )
+    assert result["success"] is True
+    assert "已生成翻唱" in result["content"]
+    # cover 被调用且 audio_url 透传
+    plugin_with_services.music_service.cover.assert_awaited_once()
+    kwargs = plugin_with_services.music_service.cover.await_args.kwargs
+    assert kwargs["audio_url"] == "https://example.com/song.mp3"
+    assert kwargs["prompt"] == "acoustic cover with soft piano"
+    # _send_audio 触发
+    mock_ctx.send.custom.assert_awaited()
+
+
+async def test_cover_song_failure(plugin_with_services, mock_ctx):
+    """cover 失败时返回中文错误，不发送。"""
+    plugin_with_services.music_service.cover = AsyncMock(
+        return_value={"success": False, "error": "audio_url 不可访问", "code": -1}
+    )
+    result = await plugin_with_services.cover_song(
+        prompt="cover", audio_url="https://example.com/x.mp3", stream_id="s1"
+    )
+    assert result["success"] is False
+    assert "翻唱失败" in result["content"]
+    mock_ctx.send.custom.assert_not_awaited()
+
+
+async def test_cover_song_missing_audio_url(plugin_with_services):
+    """audio_url 为空时返回错误，不调用 cover。"""
+    plugin_with_services.music_service.cover = AsyncMock()
+    result = await plugin_with_services.cover_song(prompt="cover", audio_url="")
+    assert result["success"] is False
+    assert "audio_url" in result["content"]
+    plugin_with_services.music_service.cover.assert_not_awaited()
+
+
+async def test_cover_song_with_custom_lyrics(plugin_with_services):
+    """传 lyrics 时透传给 cover（非 None）。"""
+    plugin_with_services.music_service.cover = AsyncMock(return_value=_success_result())
+    await plugin_with_services.cover_song(
+        prompt="cover",
+        audio_url="https://example.com/s.mp3",
+        lyrics="[verse]\nnew lyrics",
+        stream_id="s1",
+    )
+    kwargs = plugin_with_services.music_service.cover.await_args.kwargs
+    assert kwargs["lyrics"] == "[verse]\nnew lyrics"
+
+
+# ----------------------------------------------------------------------
 # buddy_sings 工具
 # ----------------------------------------------------------------------
 

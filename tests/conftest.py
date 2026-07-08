@@ -155,7 +155,7 @@ def mock_ctx(tmp_path):
     return ctx
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def fast_sleep():
     """将 ``asyncio.sleep`` 替换为 no-op AsyncMock，加速重试类测试。"""
     with patch("asyncio.sleep", new=AsyncMock()):

@@ -6,7 +6,7 @@
 
 - 🎵 **人声生成**：支持自定义歌词或自动生成，生成带歌词的人声歌曲
 - 🎸 **纯音乐生成**：无歌词背景音乐，适合场景配乐
-- 🎤 **翻唱生成**：基于参考音频的风格翻唱
+- 🎤 **翻唱生成**：基于用户提供的音频直链 URL，调用 MiniMax 翻唱模型生成新版本（`cover_song` 工具）
 - 🐾 **buddy-sings**：基于 bot 人格构建专属声音身份，让 bot 用独特嗓音唱歌
 - 🔄 **配置热重载**：修改配置无需重启，自动生效（插件配置 + 全局 Bot 配置）
 - 📁 **智能输出**：音频自动保存到数据目录，文件名含时间戳
@@ -115,6 +115,23 @@ vi config.toml
 - 使用自定义歌词：LLM 调用 `generate_song(prompt="upbeat synth-pop", mode="vocal", lyrics="[verse]\nWalking through the neon light...")`，使用传入歌词合成。
 
 > `mode=instrumental` 仅 `music-2.5+` / `music-2.6-free` 模型支持，`music-2.5` 不支持时会返回明确错误。
+
+### `cover_song` 工具
+
+基于用户提供的参考音频 URL 进行翻唱生成。用户发一个音频直链，插件调用 MiniMax 翻唱模型生成新版本。
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `prompt` | string | 是 | - | 翻唱风格描述，建议英文（如 `acoustic cover with soft piano, slower tempo`） |
+| `audio_url` | string | 是 | - | 参考音频的直链 URL，需为可直接下载的音频文件（`.mp3`/`.wav` 等） |
+| `lyrics` | string | 否 | `""` | 自定义歌词，不传则保持原曲歌词 |
+| `msg_id` | string | 否 | `""` | 当前消息 ID |
+
+**使用示例**：
+- 用户发链接翻唱：用户发送「帮我翻唱这首歌 https://example.com/song.mp3，改成钢琴版」，LLM 调用 `cover_song(prompt="soft piano cover, slower tempo, gentle", audio_url="https://example.com/song.mp3")`，插件生成翻唱版本并保存为 `YYYYMMDD_HHMMSS_<slug>.mp3`，通过语音消息发送。
+- 自定义歌词翻唱：LLM 调用 `cover_song(prompt="acoustic cover", audio_url="https://example.com/song.mp3", lyrics="[verse]\n自定义歌词...")`。
+
+> **注意**：`audio_url` 必须是可直接下载的音频文件直链，不能是网页链接（如网易云/QQ音乐的歌曲页面 URL），需用直链下载地址。
 
 ### `buddy_sings` 工具
 
