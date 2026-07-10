@@ -58,33 +58,34 @@ class MusicSectionConfig(PluginConfigBase):
     __ui_label__ = "音乐生成"
     __ui_icon__ = "music_note"
 
-    minimax_api_key: str = Field(default="", description="MiniMax API Key")
-    api_base_url: str = Field(default="https://api.minimaxi.com", description="MiniMax API 地址")
-    model: str = Field(default="music-2.6-free", description="音乐模型")
-    output_dir: str = Field(default="", description="音频输出目录，空则用 data_dir/output")
-    audio_format: str = Field(default="mp3", description="音频格式")
-    sample_rate: int = Field(default=44100, description="采样率")
-    bitrate: int = Field(default=256000, description="比特率")
-    send_mode: str = Field(default="record", description="发送方式：record/file/text")
-    max_retries: int = Field(default=3, description="最大重试次数")
-    retry_backoff_base: float = Field(default=1.5, description="重试退避基数")
+    minimax_api_key: str = Field(default="", description="MiniMax API Key（必填，在 https://platform.minimaxi.com 申请，留空将禁用插件）")
+    api_base_url: str = Field(default="https://api.minimaxi.com", description="MiniMax API 地址（国内版默认地址，国际版请使用 https://api.minimax.io）")
+    model: str = Field(default="music-2.6-free", description="音乐模型：music-2.6 / music-2.6-free（生成）/ music-cover / music-cover-free（翻唱）")
+    output_dir: str = Field(default="", description="音频输出目录，留空则使用插件数据目录下的 output/")
+    audio_format: str = Field(default="mp3", description="音频格式：mp3 / wav / pcm")
+    sample_rate: int = Field(default=44100, description="采样率：16000 / 24000 / 32000 / 44100")
+    bitrate: int = Field(default=256000, description="比特率：32000 / 64000 / 128000 / 256000")
+    output_format: str = Field(default="hex", description="API 音频返回方式：hex（默认）或 url")
+    send_mode: str = Field(default="record", description="发送方式：record（语音）/ file（文件）/ text（仅文本提示）")
+    max_retries: int = Field(default=3, description="API 调用最大重试次数（仅限流、网络异常等瞬时错误重试）")
+    retry_backoff_base: float = Field(default=1.5, description="指数退避基数")
 
 
 class BuddySectionConfig(PluginConfigBase):
     __ui_label__ = "宠物唱歌"
     __ui_icon__ = "pets"
 
-    enabled: bool = Field(default=True, description="是否启用 buddy_sings")
-    voice_cache_dir: str = Field(default="", description="声音身份缓存目录，空则用 data_dir/voices")
-    default_language: str = Field(default="zh", description="歌词默认语言")
-    fallback_nickname: str = Field(default="麦麦", description="回退昵称")
-    fallback_personality: str = Field(default="", description="回退人格描述")
+    enabled: bool = Field(default=True, description="是否启用宠物唱歌工具 buddy_sings")
+    voice_cache_dir: str = Field(default="", description="声音身份缓存目录，留空则使用插件数据目录下的 voices/")
+    default_language: str = Field(default="zh", description="歌词默认语言（如 zh / en / ja / ko）")
+    fallback_nickname: str = Field(default="麦麦", description="无法读取全局 Bot 配置时使用的昵称")
+    fallback_personality: str = Field(default="", description="无法读取全局 Bot 配置时使用的人格描述")
 
 
 class MusicPluginConfig(PluginConfigBase):
-    plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
-    music: MusicSectionConfig = Field(default_factory=MusicSectionConfig)
-    buddy: BuddySectionConfig = Field(default_factory=BuddySectionConfig)
+    plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig, description="插件基础配置")
+    music: MusicSectionConfig = Field(default_factory=MusicSectionConfig, description="MiniMax 音乐 API 配置")
+    buddy: BuddySectionConfig = Field(default_factory=BuddySectionConfig, description="宠物唱歌功能配置")
 
 
 # ====================================================================
@@ -161,6 +162,7 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
                 max_retries=music_cfg.max_retries,
                 retry_backoff_base=music_cfg.retry_backoff_base,
                 logger=self.ctx.logger,
+                output_format=music_cfg.output_format,
             )
 
             # 解析 voice_cache_dir 并初始化 voice_mgr
@@ -238,6 +240,7 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
                 self.music_service.update_api_key(music_cfg.minimax_api_key)
                 self.music_service.update_api_base_url(music_cfg.api_base_url)
                 self.music_service.update_model(music_cfg.model)
+                self.music_service.update_output_format(music_cfg.output_format)
             else:
                 self.music_service = MiniMaxMusicService(
                     api_key=music_cfg.minimax_api_key,
@@ -246,6 +249,7 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
                     max_retries=music_cfg.max_retries,
                     retry_backoff_base=music_cfg.retry_backoff_base,
                     logger=self.ctx.logger,
+                    output_format=music_cfg.output_format,
                 )
 
         # voice_mgr 没有 update 方法，重建（磁盘缓存保留）
@@ -780,15 +784,11 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
 
     @Tool(
         "cover_song",
-        brief_description="基于用户提供的参考音频 URL 进行翻唱生成",
+        brief_description="基于参考音频或预处理特征进行翻唱生成",
         detailed_description=(
-            "翻唱生成。用户提供一首参考歌曲的 URL（audio_url），"
-            "由 MiniMax 音乐翻唱模型生成新版本。prompt 用英文描述翻唱风格效果最佳。\n\n"
-            "必填参数：\n"
-            "- prompt：翻唱风格描述（英文，如 'acoustic cover with soft piano, slower tempo'）\n"
-            "- audio_url：参考音频的直链 URL（需为可直接下载的音频文件 URL，如 .mp3/.wav）\n\n"
-            "可选参数：\n"
-            "- lyrics：自定义歌词，不传则保持原曲歌词\n"
+            "翻唱生成。audio_url、audio_base64、cover_feature_id 必须且只能提供一个；"
+            "使用 cover_feature_id 时必须同时提供预处理后可编辑的 lyrics。\n"
+            "prompt 为 10-300 字符的目标翻唱风格描述。\n"
             "- msg_id：当前消息 ID"
         ),
         parameters=[
@@ -799,10 +799,25 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
                 required=True,
             ),
             ToolParameterInfo(
+                name="audio_base64",
+                param_type=ToolParamType.STRING,
+                description="参考音频的 base64 编码，与其他音频来源互斥",
+                required=False,
+                default="",
+            ),
+            ToolParameterInfo(
+                name="cover_feature_id",
+                param_type=ToolParamType.STRING,
+                description="翻唱预处理返回的特征 ID，与其他音频来源互斥",
+                required=False,
+                default="",
+            ),
+            ToolParameterInfo(
                 name="audio_url",
                 param_type=ToolParamType.STRING,
                 description="参考音频的直链 URL，需为可直接下载的音频文件（.mp3/.wav 等）",
-                required=True,
+                required=False,
+                default="",
             ),
             ToolParameterInfo(
                 name="lyrics",
@@ -823,7 +838,9 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
     async def cover_song(
         self,
         prompt: str,
-        audio_url: str,
+        audio_url: str = "",
+        audio_base64: str = "",
+        cover_feature_id: str = "",
         lyrics: str = "",
         msg_id: str = "",
         **kwargs: Any,
@@ -841,12 +858,12 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
             if not prompt:
                 return {"success": False, "content": "prompt 不能为空"}
 
-            if audio_url is None:
-                return {"success": False, "content": "audio_url 不能为空"}
-            audio_url = str(audio_url).strip()
-            if not audio_url:
-                return {"success": False, "content": "audio_url 不能为空"}
-            if not (audio_url.startswith("http://") or audio_url.startswith("https://")):
+            audio_url = str(audio_url or "").strip()
+            audio_base64 = str(audio_base64 or "").strip()
+            cover_feature_id = str(cover_feature_id or "").strip()
+            if sum(bool(value) for value in (audio_url, audio_base64, cover_feature_id)) != 1:
+                return {"success": False, "content": "audio_url、audio_base64、cover_feature_id 必须且只能提供一个"}
+            if audio_url and not (audio_url.startswith("http://") or audio_url.startswith("https://")):
                 return {"success": False, "content": "audio_url 必须是 http:// 或 https:// 开头的 URL"}
 
             # 2. 解析 stream_id
@@ -855,8 +872,13 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
             # 3. 调用 music_service.cover（走 audio_url 路径，不上传本地文件）
             result = await self.music_service.cover(
                 prompt=prompt,
-                audio_url=audio_url,
+                audio_url=audio_url or None,
+                audio_base64=audio_base64 or None,
+                cover_feature_id=cover_feature_id or None,
                 lyrics=lyrics or None,
+                sample_rate=self.config.music.sample_rate,
+                bitrate=self.config.music.bitrate,
+                fmt=self.config.music.audio_format,
             )
 
             # 4. 成功
@@ -894,7 +916,7 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
             self.ctx.logger.warning("cover_song 失败：%s (code=%s)", error, result.get("code"))
             return {
                 "success": False,
-                "content": f"翻唱失败：{error}，请稍后重试或检查参考音频 URL 是否可访问",
+                "content": f"翻唱失败：{error}，请检查参数或稍后重试",
             }
         except Exception:
             self.ctx.logger.exception("cover_song 未预期异常")
@@ -902,6 +924,88 @@ class MiniMaxMusicPlugin(MaiBotPlugin):
                 "success": False,
                 "content": "翻唱时发生未预期错误，请稍后重试",
             }
+
+    @Tool(
+        "cover_preprocess",
+        brief_description="预处理参考音频，提取翻唱特征和可编辑歌词",
+        detailed_description="audio_url 与 audio_base64 必须且只能提供一个；返回的歌词可修改后连同 cover_feature_id 传给 cover_song。",
+        parameters=[
+            ToolParameterInfo(name="audio_url", param_type=ToolParamType.STRING, description="参考音频直链 URL", required=False, default=""),
+            ToolParameterInfo(name="audio_base64", param_type=ToolParamType.STRING, description="参考音频的 base64 编码", required=False, default=""),
+        ],
+    )
+    async def cover_preprocess(
+        self, audio_url: str = "", audio_base64: str = "", **kwargs: Any
+    ) -> dict[str, Any]:
+        """执行两步翻唱的第一步。"""
+        del kwargs
+        if not self._enabled or not self.music_service:
+            return {"success": False, "content": "插件未启用（API Key 未配置）"}
+        audio_url = str(audio_url or "").strip()
+        audio_base64 = str(audio_base64 or "").strip()
+        if bool(audio_url) == bool(audio_base64):
+            return {"success": False, "content": "audio_url 和 audio_base64 必须且只能提供一个"}
+        if audio_url and not audio_url.startswith(("http://", "https://")):
+            return {"success": False, "content": "audio_url 必须是 http:// 或 https:// 开头的 URL"}
+        try:
+            result = await self.music_service.cover_preprocess(
+                audio_url=audio_url or None, audio_base64=audio_base64 or None
+            )
+        except Exception:
+            self.ctx.logger.exception("cover_preprocess 未预期异常")
+            return {"success": False, "content": "翻唱预处理时发生未预期错误"}
+        if not result.get("success"):
+            return {"success": False, "content": f"翻唱预处理失败：{result.get('error', '未知错误')}"}
+        return {
+            "success": True,
+            "content": "翻唱预处理完成，可修改 formatted_lyrics 后调用 cover_song",
+            "cover_feature_id": result["cover_feature_id"],
+            "formatted_lyrics": result["formatted_lyrics"],
+            "audio_duration": result.get("audio_duration"),
+        }
+
+    @Tool(
+        "generate_lyrics",
+        brief_description="使用 MiniMax 创作或编辑歌词",
+        detailed_description="write_full_song 模式按 prompt 创作完整歌词；edit 模式按 prompt 编辑传入的 lyrics。",
+        parameters=[
+            ToolParameterInfo(name="mode", param_type=ToolParamType.STRING, description="歌词模式：write_full_song 或 edit", required=False, default="write_full_song"),
+            ToolParameterInfo(name="prompt", param_type=ToolParamType.STRING, description="歌词创作主题或编辑要求", required=False, default=""),
+            ToolParameterInfo(name="lyrics", param_type=ToolParamType.STRING, description="edit 模式下待修改的歌词", required=False, default=""),
+            ToolParameterInfo(name="title", param_type=ToolParamType.STRING, description="歌曲标题，提供后生成结果将保持该标题", required=False, default=""),
+        ],
+    )
+    async def generate_lyrics(
+        self,
+        prompt: str = "",
+        mode: str = "write_full_song",
+        lyrics: str = "",
+        title: str = "",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """创作完整歌词或编辑已有歌词。"""
+        del kwargs
+        if not self._enabled or not self.music_service:
+            return {"success": False, "content": "插件未启用（API Key 未配置）"}
+        try:
+            result = await self.music_service.generate_lyrics(
+                mode=str(mode or "").strip(),
+                prompt=str(prompt or "").strip() or None,
+                lyrics=str(lyrics or "").strip() or None,
+                title=str(title or "").strip() or None,
+            )
+        except Exception:
+            self.ctx.logger.exception("generate_lyrics 未预期异常")
+            return {"success": False, "content": "歌词生成时发生未预期错误"}
+        if not result.get("success"):
+            return {"success": False, "content": f"歌词生成失败：{result.get('error', '未知错误')}"}
+        return {
+            "success": True,
+            "content": result["lyrics"],
+            "lyrics": result["lyrics"],
+            "song_title": result.get("song_title"),
+            "style_tags": result.get("style_tags"),
+        }
 
     # ------------------------------------------------------------------
     # @Tool: buddy_sings

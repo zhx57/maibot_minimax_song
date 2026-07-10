@@ -8,3 +8,7 @@ __pycache__/
 .voice_cache.json
 .pytest_cache/
 *.egg-info/
+
+# codex 参考资料与提示词（本地开发用，不提交）
+_refs/
+_codex_prompt*.md

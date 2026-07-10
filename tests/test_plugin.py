@@ -127,7 +127,7 @@ async def test_on_config_update_self_scope(plugin_with_services):
     """scope=CONFIG_RELOAD_SCOPE_SELF 时更新 service 配置。"""
     plugin_with_services.config.music.minimax_api_key = "new-key"
     plugin_with_services.config.music.api_base_url = "https://api.minimax.io"
-    plugin_with_services.config.music.model = "music-2.5+"
+    plugin_with_services.config.music.model = "music-2.6"
     await plugin_with_services.on_config_update(
         scope=CONFIG_RELOAD_SCOPE_SELF, config_data={}, version="2"
     )
@@ -135,7 +135,8 @@ async def test_on_config_update_self_scope(plugin_with_services):
     plugin_with_services.music_service.update_api_base_url.assert_called_once_with(
         "https://api.minimax.io"
     )
-    plugin_with_services.music_service.update_model.assert_called_once_with("music-2.5+")
+    plugin_with_services.music_service.update_model.assert_called_once_with("music-2.6")
+    plugin_with_services.music_service.update_output_format.assert_called_once_with("hex")
     assert plugin_with_services._enabled is True
 
 
@@ -286,6 +287,48 @@ async def test_cover_song_with_custom_lyrics(plugin_with_services):
     )
     kwargs = plugin_with_services.music_service.cover.await_args.kwargs
     assert kwargs["lyrics"] == "[verse]\nnew lyrics"
+
+
+async def test_cover_preprocess_tool(plugin_with_services):
+    """cover_preprocess 工具透传音频来源并返回特征与歌词。"""
+    plugin_with_services.music_service.cover_preprocess = AsyncMock(
+        return_value={
+            "success": True,
+            "cover_feature_id": "feature-1",
+            "formatted_lyrics": "[Verse]\nhello",
+            "audio_duration": 42,
+        }
+    )
+    result = await plugin_with_services.cover_preprocess(
+        audio_url="https://example.com/song.mp3"
+    )
+    assert result["success"] is True
+    assert result["cover_feature_id"] == "feature-1"
+    assert result["formatted_lyrics"] == "[Verse]\nhello"
+    plugin_with_services.music_service.cover_preprocess.assert_awaited_once_with(
+        audio_url="https://example.com/song.mp3", audio_base64=None
+    )
+
+
+async def test_generate_lyrics_tool(plugin_with_services):
+    """generate_lyrics 工具透传官方字段并返回结构化结果。"""
+    plugin_with_services.music_service.generate_lyrics = AsyncMock(
+        return_value={
+            "success": True,
+            "lyrics": "[Verse]\nsummer wind",
+            "song_title": "Summer",
+            "style_tags": "Pop, Upbeat",
+        }
+    )
+    result = await plugin_with_services.generate_lyrics(
+        mode="write_full_song", prompt="summer", title="Summer"
+    )
+    assert result["success"] is True
+    assert result["lyrics"] == "[Verse]\nsummer wind"
+    assert result["song_title"] == "Summer"
+    plugin_with_services.music_service.generate_lyrics.assert_awaited_once_with(
+        mode="write_full_song", prompt="summer", lyrics=None, title="Summer"
+    )
 
 
 # ----------------------------------------------------------------------

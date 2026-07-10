@@ -32,7 +32,7 @@ pip install -r requirements.txt
 测试依赖（可选）：
 
 ```bash
-pip install pytest pytest-asyncio aioresponses
+pip install -r requirements-dev.txt
 ```
 
 ### 3. 配置 API Key
@@ -68,11 +68,12 @@ vi config.toml
 |--------|------|--------|------|
 | `minimax_api_key` | string | `""` | MiniMax API Key（必填，留空将禁用插件，在 https://platform.minimaxi.com 申请） |
 | `api_base_url` | string | `"https://api.minimaxi.com"` | MiniMax API 地址（国内版，国际版用 `https://api.minimax.io`） |
-| `model` | string | `"music-2.6-free"` | 音乐模型：`music-2.6-free` / `music-2.5+` / `music-2.5`（instrumental 仅 2.5+/2.6-free 支持） |
+| `model` | string | `"music-2.6-free"` | 音乐模型：`music-2.6` / `music-2.6-free`（生成）/ `music-cover` / `music-cover-free`（翻唱） |
 | `output_dir` | string | `""` | 音频输出目录，留空则使用插件数据目录下的 `output/` |
 | `audio_format` | string | `"mp3"` | 音频格式：`mp3` / `wav` / `pcm` |
 | `sample_rate` | int | `44100` | 采样率 |
 | `bitrate` | int | `256000` | 比特率（仅 mp3 生效） |
+| `output_format` | string | `"hex"` | API 音频返回方式：`hex` 或 `url` |
 | `send_mode` | string | `"record"` | 发送方式：`record`(语音消息) / `file`(文件消息) / `text`(仅文本提示)；record 适合 QQ NapCat，失败会自动回退 |
 | `max_retries` | int | `3` | API 调用最大重试次数（仅对限流/网络错误重试） |
 | `retry_backoff_base` | float | `1.5` | 重试退避基数（指数退避：`base ** attempt + 随机抖动`） |
@@ -89,7 +90,7 @@ vi config.toml
 
 ## 工具说明
 
-插件暴露两个 `@Tool` 供 LLM 自主调用，LLM 会根据对话上下文判断何时使用。`stream_id` 由插件自动从消息上下文解析，无需 LLM 显式传入。
+插件暴露音乐生成、翻唱、翻唱预处理、歌词生成和宠物唱歌工具。`stream_id` 由插件自动从消息上下文解析，无需 LLM 显式传入。
 
 ### `generate_song` 工具
 
@@ -114,16 +115,18 @@ vi config.toml
 - 生成一段纯音乐配乐：LLM 调用 `generate_song(prompt="jazz piano, relaxing, late night cafe", mode="instrumental")`，生成无歌词背景音乐。
 - 使用自定义歌词：LLM 调用 `generate_song(prompt="upbeat synth-pop", mode="vocal", lyrics="[verse]\nWalking through the neon light...")`，使用传入歌词合成。
 
-> `mode=instrumental` 仅 `music-2.5+` / `music-2.6-free` 模型支持，`music-2.5` 不支持时会返回明确错误。
+> `mode=instrumental` 和歌词优化仅 `music-2.6` / `music-2.6-free` 生成模型支持。
 
 ### `cover_song` 工具
 
-基于用户提供的参考音频 URL 进行翻唱生成。用户发一个音频直链，插件调用 MiniMax 翻唱模型生成新版本。
+基于参考音频 URL、base64 音频或预处理特征 ID 进行翻唱生成。
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `prompt` | string | 是 | - | 翻唱风格描述，建议英文（如 `acoustic cover with soft piano, slower tempo`） |
-| `audio_url` | string | 是 | - | 参考音频的直链 URL，需为可直接下载的音频文件（`.mp3`/`.wav` 等） |
+| `audio_url` | string | 否 | `""` | 参考音频直链 URL，与其他音频来源互斥 |
+| `audio_base64` | string | 否 | `""` | 参考音频的 base64 编码，与其他音频来源互斥 |
+| `cover_feature_id` | string | 否 | `""` | `cover_preprocess` 返回的特征 ID，与其他音频来源互斥 |
 | `lyrics` | string | 否 | `""` | 自定义歌词，不传则保持原曲歌词 |
 | `msg_id` | string | 否 | `""` | 当前消息 ID |
 
@@ -132,6 +135,8 @@ vi config.toml
 - 自定义歌词翻唱：LLM 调用 `cover_song(prompt="acoustic cover", audio_url="https://example.com/song.mp3", lyrics="[verse]\n自定义歌词...")`。
 
 > **注意**：`audio_url` 必须是可直接下载的音频文件直链，不能是网页链接（如网易云/QQ音乐的歌曲页面 URL），需用直链下载地址。
+
+`audio_url`、`audio_base64`、`cover_feature_id` 必须且只能提供一个。两步翻唱先调用 `cover_preprocess` 获取特征 ID 和格式化歌词，修改歌词后再调用 `cover_song`；使用特征 ID 时歌词必填。`generate_lyrics` 支持 `write_full_song` 和 `edit` 两种模式，并可用 `title` 固定歌曲标题。
 
 ### `buddy_sings` 工具
 
@@ -210,9 +215,10 @@ if result.get("success"):
 | `1004` | 鉴权失败 | 检查 API Key | ❌ 否 |
 | `1008` | 余额不足 | 充值 | ❌ 否 |
 | `1026` | 内容违规 | 修改 prompt / 歌词 | ❌ 否 |
-| `2013` | 参数错误 | 检查参数（如 instrumental 用了 music-2.5） | ❌ 否 |
+| `2013` | 参数错误 | 检查模型及请求参数是否符合接口约束 | ❌ 否 |
+| `2049` | API Key 无效 | 检查 API Key | ❌ 否 |
 
-> 仅 `1002`（限流）与网络异常会触发指数退避重试（`retry_backoff_base ** attempt + 随机抖动`，最多 `max_retries` 次）；致命错误（`1004`/`1008`/`1026`/`2013`）直接失败并记录日志，不再重试。未知错误码归为致命错误。
+> 仅 `1002`（限流）与网络异常会触发指数退避重试（`retry_backoff_base ** attempt + 随机抖动`，最多 `max_retries` 次）；致命错误（`1004`/`1008`/`1026`/`2013`/`2049`）直接失败并记录日志，不再重试。未知错误码归为致命错误。
 
 ## 平台适配器要求
 
@@ -234,12 +240,12 @@ if result.get("success"):
 ## 注意事项
 
 1. **API Key 申请**：需在 [MiniMax 开放平台](https://platform.minimaxi.com) 申请，个人/企业认证后可用；国际版用户改用 `https://api.minimax.io` 并相应修改 `api_base_url`
-2. **模型支持**：默认 `music-2.6-free`；纯音乐（`instrumental`）仅 `music-2.5+` / `music-2.6-free` 支持，`music-2.5` 不支持
+2. **模型支持**：默认 `music-2.6-free`；生成使用 `music-2.6` 系列，翻唱使用 `music-cover` 系列
 3. **生成耗时**：音乐生成通常需要 30–120 秒，请耐心等待；超时由 `max_retries` 与指数退避覆盖网络瞬时错误
 4. **文件管理**：输出目录会累积 mp3 文件，建议定期清理（路径见日志或返回的 `file_path`）
 5. **buddy-sings 声音身份缓存**：修改 bot 人格后会自动检测失效并重建；也可用 `regenerate="true"` 手动重建
 6. **配置热重载**：修改 `config.toml` 后自动生效，无需重启 MaiBot；修改全局 Bot 配置（昵称/人格）也会同步更新声音身份
-7. **文本长度限制**：`prompt` 上限 2000 字符；`lyrics` 上限 3500 字符且不可为空，超出会返回明确错误
+7. **文本长度限制**：音乐生成的 `prompt` / `lyrics` 上限均为 1500 字符；翻唱的 `prompt` 为 10–300 字符、`lyrics` 为 10–1000 字符；歌词接口的 `prompt` 上限为 2000 字符、`lyrics` 上限为 3500 字符
 8. **费用**：按 MiniMax 音乐生成定价计费，详见 MiniMax 官方定价
 
 ## 目录结构

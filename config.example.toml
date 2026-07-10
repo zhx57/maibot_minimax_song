@@ -10,14 +10,15 @@ config_version = "1.0.0" # 配置版本号
 # 音乐生成设置（MiniMax Music API）
 minimax_api_key = ""                              # MiniMax API Key（必填，留空将禁用插件，在 https://platform.minimaxi.com 申请）
 api_base_url = "https://api.minimaxi.com"         # MiniMax API 地址（国内版，国际版用 https://api.minimax.io）
-model = "music-2.6-free"                          # 音乐模型：music-2.6-free / music-2.5+ / music-2.5（instrumental 仅 2.5+/2.6-free 支持）
+model = "music-2.6-free"                          # 音乐模型：music-2.6 / music-2.6-free（生成）/ music-cover / music-cover-free（翻唱）
 output_dir = ""                                   # 音频输出目录，留空则使用插件数据目录下的 output/
 audio_format = "mp3"                              # 音频格式：mp3 / wav / pcm
-sample_rate = 44100                               # 采样率
-bitrate = 256000                                  # 比特率（仅 mp3 生效）
-send_mode = "record"                              # 发送方式：record(语音消息) / file(文件消息) / text(仅文本提示)；record 适合 QQ NapCat，失败会自动回退
+    sample_rate = 44100                               # 采样率：16000 / 24000 / 32000 / 44100
+    bitrate = 256000                                  # 比特率：32000 / 64000 / 128000 / 256000
+output_format = "hex"                             # API 音频返回方式：hex（默认）或 url
+    send_mode = "record"                              # 发送方式：record（语音）/ file（文件）/ text（仅文本提示）
 max_retries = 3                                   # API 调用最大重试次数（仅对限流/网络错误重试）
-retry_backoff_base = 1.5                          # 重试退避基数（指数退避：base ** attempt + 随机抖动）
+    retry_backoff_base = 1.5                          # 指数退避基数
 
 [buddy]
 # 宠物唱歌设置（buddy-sings 技能，让 bot 用独特嗓音唱歌）
